@@ -381,6 +381,51 @@ class PyTrainAccessory(PyTrainComponent):
         )
 
 
+class PyTrainSensorTrack(PyTrainComponent):
+    """
+    Wraps IRDA sensor track queries.
+
+    Sensor tracks are discovered by scanning blocks for ``sensor_track``
+    references, then enriched with accessory/IRDA state from the
+    ComponentStateStore.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(scope=CommandScope.ACC)
+
+    def list_all(self) -> list[dict[str, Any]]:
+        """Return a list of SensorTrackInfo-compatible dicts for every sensor track."""
+        blocks = self.state_store.query(CommandScope.BLOCK)
+        sensor_ids: set[int] = set()
+        if blocks:
+            for blk in blocks:
+                d = blk.as_dict()
+                st = d.get("sensor_track")
+                if st is not None:
+                    sensor_ids.add(st)
+
+        results: list[dict[str, Any]] = []
+        for sid in sorted(sensor_ids):
+            results.append(self._build_info(sid))
+        return results
+
+    def get_by_id(self, sensor_id: int) -> dict[str, Any] | None:
+        """Return a single SensorTrackInfo dict, or *None* if not found."""
+        for info in self.list_all():
+            if info["sensor_id"] == sensor_id:
+                return info
+        return None
+
+    def _build_info(self, sensor_id: int) -> dict[str, Any]:
+        info: dict[str, Any] = {"sensor_id": sensor_id, "scope": "sensor_track"}
+        acc_state = self.state_store.query(CommandScope.ACC, sensor_id)
+        if acc_state:
+            ad = acc_state.as_dict()
+            info["road_name"] = ad.get("road_name")
+            info["road_number"] = ad.get("road_number")
+        return info
+
+
 class PyTrainSwitch(PyTrainComponent):
     def __init__(self, scope: CommandScope):
         super().__init__(scope=scope)

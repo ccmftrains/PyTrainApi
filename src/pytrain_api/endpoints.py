@@ -56,6 +56,7 @@ from .pytrain_component import (
     PyTrainAccessory,
     PyTrainComponent,
     PyTrainEngine,
+    PyTrainSensorTrack,
     PyTrainSwitch,
     SmokeOption,
     SwitchPosition,
@@ -1998,35 +1999,7 @@ class Train(PyTrainEngine):
 # Sensor Tracks
 # ---------------------------------------------------------------------------
 
-
-def get_sensor_tracks() -> list[dict[str, Any]]:
-    """
-    Query sensor track data from the PyTrain state store.
-    Sensor tracks are stored under the ACC scope with a sensor_track type.
-    Returns a list of SensorTrackInfo-compatible dicts.
-    """
-    api = PyTrainApi.get()
-    store = api.pytrain.store
-    blocks = store.query(CommandScope.BLOCK)
-    sensor_ids: set[int] = set()
-    if blocks:
-        for blk in blocks:
-            d = blk.as_dict()
-            st = d.get("sensor_track")
-            if st is not None:
-                sensor_ids.add(st)
-
-    results = []
-    for sid in sorted(sensor_ids):
-        info: dict[str, Any] = {"sensor_id": sid, "scope": "sensor_track"}
-        # Try to pull IRDA state from accessories
-        acc_state = store.query(CommandScope.ACC, sid)
-        if acc_state:
-            ad = acc_state.as_dict()
-            info["road_name"] = ad.get("road_name")
-            info["road_number"] = ad.get("road_number")
-        results.append(info)
-    return results
+_sensor_track_component = PyTrainSensorTrack()
 
 
 @api_get(
@@ -2038,7 +2011,7 @@ def get_sensor_tracks() -> list[dict[str, Any]]:
     include_404=True,
 )
 async def list_sensor_tracks() -> list[SensorTrackInfo]:
-    data = get_sensor_tracks()
+    data = _sensor_track_component.list_all()
     if not data:
         headers = {"X-Error": "404"}
         raise HTTPException(status_code=404, headers=headers, detail="No sensor tracks found")
@@ -2056,11 +2029,11 @@ async def list_sensor_tracks() -> list[SensorTrackInfo]:
 async def get_sensor_track(
     sensor_id: Annotated[int, Path(title="Sensor ID", description="Sensor Track ID", ge=1, le=99)],
 ) -> SensorTrackInfo:
-    for d in get_sensor_tracks():
-        if d["sensor_id"] == sensor_id:
-            return SensorTrackInfo(**d)
-    headers = {"X-Error": "404"}
-    raise HTTPException(status_code=404, headers=headers, detail=f"Sensor track {sensor_id} not found")
+    info = _sensor_track_component.get_by_id(sensor_id)
+    if info is None:
+        headers = {"X-Error": "404"}
+        raise HTTPException(status_code=404, headers=headers, detail=f"Sensor track {sensor_id} not found")
+    return SensorTrackInfo(**info)
 
 
 # ---------------------------------------------------------------------------
@@ -2071,14 +2044,20 @@ async def get_sensor_track(
 class ConnectionManager:
     """Manages active WebSocket connections for event broadcasting."""
 
+    HEARTBEAT_INTERVAL = 30  # seconds between server-initiated pings
+
     def __init__(self):
         self._connections: list[WebSocket] = []
         self._lock = asyncio.Lock()
+        self._heartbeat_task: asyncio.Task | None = None
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
         async with self._lock:
             self._connections.append(ws)
+            # Start heartbeat if this is the first connection
+            if self._heartbeat_task is None or self._heartbeat_task.done():
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def disconnect(self, ws: WebSocket):
         async with self._lock:
@@ -2100,6 +2079,23 @@ class ConnectionManager:
     @property
     def active_count(self) -> int:
         return len(self._connections)
+
+    async def _heartbeat_loop(self) -> None:
+        """Periodically ping all connections and remove dead ones."""
+        while True:
+            await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+            async with self._lock:
+                if not self._connections:
+                    break  # stop loop when no connections remain
+                stale: list[WebSocket] = []
+                ping = json.dumps({"type": "system", "event": "heartbeat"})
+                for ws in self._connections:
+                    try:
+                        await ws.send_text(ping)
+                    except Exception:
+                        stale.append(ws)
+                for ws in stale:
+                    self._connections.remove(ws)
 
 
 ws_manager = ConnectionManager()
