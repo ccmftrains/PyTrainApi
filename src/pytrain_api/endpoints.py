@@ -600,6 +600,11 @@ if STATIC_DIR:
     if os.path.isfile(f"{STATIC_DIR}/apple-touch-icon.png"):
         APPLE_ICON_PATH = FAVICON_PATH = f"{STATIC_DIR}/apple-touch-icon.png"
 
+# Mount PyTrainGui SPA if built GUI files are present
+GUI_DIR = find_dir("gui", (".", "../", "static"))
+if GUI_DIR and os.path.isfile(f"{GUI_DIR}/index.html"):
+    app.mount("/gui", StaticFiles(directory=GUI_DIR, html=True), name="gui")
+
 
 @app.get("/apple-touch-icon.png", include_in_schema=False)
 @app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
