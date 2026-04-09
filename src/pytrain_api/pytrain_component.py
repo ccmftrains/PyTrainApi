@@ -129,6 +129,7 @@ class Component(str, Enum):
     BLOCK = "block"
     ENGINE = "engine"
     ROUTE = "route"
+    SENSOR_TRACK = "sensor_track"
     SWITCH = "switch"
     TRAIN = "train"
 

@@ -142,6 +142,21 @@ class AccessoryInfo(ComponentInfo):
     aux2: str | None
 
 
+class SensorTrackInfo(BaseModel):
+    scope: Component = Component.SENSOR_TRACK
+    sensor_id: int
+    engine_id: int | None = None
+    train_id: int | None = None
+    road_name: str | None = None
+    road_number: str | None = None
+    direction: str | None = None
+    product_type: str | None = None
+    fuel_level: int | None = None
+    water_level: int | None = None
+    odometer: int | None = None
+    last_crossing: str | None = None
+
+
 STRICT_AMC2 = (
     "Enforce AMC2 validation. When true, the TMCC ID must resolve to a defined AMC2; "
     "otherwise the request fails. When false, the command is sent without validation."
