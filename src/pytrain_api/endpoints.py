@@ -2080,14 +2080,20 @@ class ConnectionManager:
     async def broadcast(self, message: dict[str, Any]):
         payload = json.dumps(message)
         async with self._lock:
-            stale: list[WebSocket] = []
-            for ws in self._connections:
-                try:
-                    await ws.send_text(payload)
-                except Exception:
-                    stale.append(ws)
-            for ws in stale:
-                self._connections.remove(ws)
+            snapshot = list(self._connections)
+
+        stale: list[WebSocket] = []
+        for ws in snapshot:
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                stale.append(ws)
+
+        if stale:
+            async with self._lock:
+                for ws in stale:
+                    if ws in self._connections:
+                        self._connections.remove(ws)
 
     @property
     def active_count(self) -> int:
@@ -2100,15 +2106,21 @@ class ConnectionManager:
             async with self._lock:
                 if not self._connections:
                     break  # stop loop when no connections remain
-                stale: list[WebSocket] = []
-                ping = json.dumps({"type": "system", "event": "heartbeat"})
-                for ws in self._connections:
-                    try:
-                        await ws.send_text(ping)
-                    except Exception:
-                        stale.append(ws)
-                for ws in stale:
-                    self._connections.remove(ws)
+                snapshot = list(self._connections)
+
+            stale: list[WebSocket] = []
+            ping = json.dumps({"type": "system", "event": "heartbeat"})
+            for ws in snapshot:
+                try:
+                    await ws.send_text(ping)
+                except Exception:
+                    stale.append(ws)
+
+            if stale:
+                async with self._lock:
+                    for ws in stale:
+                        if ws in self._connections:
+                            self._connections.remove(ws)
 
 
 ws_manager = ConnectionManager()
