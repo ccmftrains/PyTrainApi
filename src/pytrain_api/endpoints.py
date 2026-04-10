@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -19,7 +20,20 @@ from typing import Annotated, Any, Callable, Iterable, TypeVar
 
 import jwt
 from dotenv import find_dotenv, load_dotenv
-from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Path, Query, Request, Security, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Security,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
@@ -55,6 +69,7 @@ from .pytrain_component import (
     PyTrainAccessory,
     PyTrainComponent,
     PyTrainEngine,
+    PyTrainSensorTrack,
     PyTrainSwitch,
     SmokeOption,
     SwitchPosition,
@@ -76,6 +91,7 @@ from .pytrain_info import (
     RelativeSpeedCommand,
     ResetCommand,
     RouteInfo,
+    SensorTrackInfo,
     SpeedCommand,
     SwitchInfo,
     TrainInfo,
@@ -1995,6 +2011,196 @@ class Train(PyTrainEngine):
         duration: Annotated[float | None, Query(description="Duration (seconds)", gt=0.0)] = None,
     ) -> StatusResponse:
         return super().aux(tmcc_id, aux_req, number, duration)
+
+
+# ---------------------------------------------------------------------------
+# Sensor Tracks
+# ---------------------------------------------------------------------------
+
+_sensor_track_component = PyTrainSensorTrack()
+
+
+@api_get(
+    router,
+    "/sensor_tracks",
+    name="SensorTracks.List",
+    summary="List all sensor tracks",
+    response_model=list[SensorTrackInfo],
+    include_404=True,
+)
+async def list_sensor_tracks() -> list[SensorTrackInfo]:
+    data = _sensor_track_component.list_all()
+    if not data:
+        headers = {"X-Error": "404"}
+        raise HTTPException(status_code=404, headers=headers, detail="No sensor tracks found")
+    return [SensorTrackInfo(**d) for d in data]
+
+
+@api_get(
+    router,
+    "/sensor_track/{sensor_id:int}",
+    name="SensorTrack.Get",
+    summary="Get sensor track state",
+    response_model=SensorTrackInfo,
+    include_404=True,
+)
+async def get_sensor_track(
+    sensor_id: Annotated[int, Path(title="Sensor ID", description="Sensor Track ID", ge=1, le=99)],
+) -> SensorTrackInfo:
+    info = _sensor_track_component.get_by_id(sensor_id)
+    if info is None:
+        headers = {"X-Error": "404"}
+        raise HTTPException(status_code=404, headers=headers, detail=f"Sensor track {sensor_id} not found")
+    return SensorTrackInfo(**info)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket — real-time event stream
+# ---------------------------------------------------------------------------
+
+
+class ConnectionManager:
+    """Manages active WebSocket connections for event broadcasting."""
+
+    HEARTBEAT_INTERVAL = 30  # seconds between server-initiated pings
+
+    def __init__(self):
+        self._connections: list[WebSocket] = []
+        self._lock = asyncio.Lock()
+        self._heartbeat_task: asyncio.Task | None = None
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        async with self._lock:
+            self._connections.append(ws)
+            # Start heartbeat if this is the first connection
+            if self._heartbeat_task is None or self._heartbeat_task.done():
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+    async def disconnect(self, ws: WebSocket):
+        async with self._lock:
+            if ws in self._connections:
+                self._connections.remove(ws)
+
+    async def broadcast(self, message: dict[str, Any]):
+        payload = json.dumps(message)
+        async with self._lock:
+            snapshot = list(self._connections)
+
+        stale: list[WebSocket] = []
+        for ws in snapshot:
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                stale.append(ws)
+
+        if stale:
+            async with self._lock:
+                for ws in stale:
+                    if ws in self._connections:
+                        self._connections.remove(ws)
+
+    @property
+    def active_count(self) -> int:
+        return len(self._connections)
+
+    async def _heartbeat_loop(self) -> None:
+        """Periodically ping all connections and remove dead ones."""
+        while True:
+            await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+            async with self._lock:
+                if not self._connections:
+                    break  # stop loop when no connections remain
+                snapshot = list(self._connections)
+
+            stale: list[WebSocket] = []
+            ping = json.dumps({"type": "system", "event": "heartbeat"})
+            for ws in snapshot:
+                try:
+                    await ws.send_text(ping)
+                except Exception:
+                    stale.append(ws)
+
+            if stale:
+                async with self._lock:
+                    for ws in stale:
+                        if ws in self._connections:
+                            self._connections.remove(ws)
+
+
+ws_manager = ConnectionManager()
+
+
+def _validate_ws_api_key(api_key: str | None) -> bool:
+    """Validate an API key for WebSocket connections (same logic as REST)."""
+    if not api_key or not isinstance(api_key, str):
+        return False
+    api_key = api_key.strip()
+    if api_key.lower().startswith("bearer "):
+        api_key = api_key.split(" ", 1)[1].strip()
+    is_jwt_shaped = api_key.count(".") == 2
+    if not is_jwt_shaped:
+        if api_key == API_TOKEN:
+            return True
+        try:
+            if isinstance(API_KEYS, dict):
+                return api_key in API_KEYS.values()
+            return api_key in API_KEYS
+        except TypeError:
+            return False
+    # JWT path
+    try:
+        payload = jwt.decode(api_key, SECRET_KEY, algorithms=[ALGORITHM])
+    except (ExpiredSignatureError, InvalidSignatureError, DecodeError, InvalidTokenError):
+        return False
+    if payload and payload.get("magic") == API_NAME:
+        return True
+    return False
+
+
+@app.websocket("/pytrain/v1/ws/events")
+async def ws_events(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time event streaming.
+    Authenticate via ?api_key= query parameter or X-API-Key header.
+    """
+    api_key = websocket.query_params.get("api_key") or websocket.headers.get("x-api-key")
+    if not _validate_ws_api_key(api_key):
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    await ws_manager.connect(websocket)
+    try:
+        # Send initial connection confirmation
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "system",
+                    "event": "connected",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+        # Keep connection alive — listen for client pings/messages
+        while True:
+            data = await websocket.receive_text()
+            # Echo pings
+            if data == "ping":
+                await websocket.send_text(json.dumps({"type": "system", "event": "pong"}))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await ws_manager.disconnect(websocket)
+
+
+async def broadcast_event(event_type: str, **kwargs: Any) -> None:
+    """Helper to broadcast an event to all connected WebSocket clients."""
+    msg = {
+        "type": event_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **kwargs,
+    }
+    await ws_manager.broadcast(msg)
 
 
 app.include_router(router)
