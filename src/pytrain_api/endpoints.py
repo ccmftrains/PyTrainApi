@@ -20,7 +20,10 @@ from typing import Annotated, Any, Callable, Iterable, TypeVar
 
 import jwt
 from dotenv import find_dotenv, load_dotenv
-from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Path, Query, Request, Security, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter, Body, Depends, FastAPI, HTTPException, Path, Query,
+    Request, Security, WebSocket, WebSocketDisconnect, status,
+)
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
