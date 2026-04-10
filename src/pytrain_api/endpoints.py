@@ -21,8 +21,18 @@ from typing import Annotated, Any, Callable, Iterable, TypeVar
 import jwt
 from dotenv import find_dotenv, load_dotenv
 from fastapi import (
-    APIRouter, Body, Depends, FastAPI, HTTPException, Path, Query,
-    Request, Security, WebSocket, WebSocketDisconnect, status,
+    APIRouter,
+    Body,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Security,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
 )
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, JSONResponse
@@ -2145,11 +2155,15 @@ async def ws_events(websocket: WebSocket):
     await ws_manager.connect(websocket)
     try:
         # Send initial connection confirmation
-        await websocket.send_text(json.dumps({
-            "type": "system",
-            "event": "connected",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }))
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "system",
+                    "event": "connected",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
         # Keep connection alive — listen for client pings/messages
         while True:
             data = await websocket.receive_text()
